@@ -21,12 +21,11 @@ use bollard::{
     Docker,
 };
 use ferroid::{base32::Base32UlidExt, id::ULID};
-use futures::{pin_mut, StreamExt, TryStreamExt};
+use futures::{StreamExt, TryStreamExt};
 use tokio::{
     io::AsyncRead,
     sync::{Mutex, OnceCell},
 };
-use tokio_tar::{Archive as AsyncTarArchive, EntryType};
 use tokio_util::io::StreamReader;
 use url::Url;
 
@@ -463,31 +462,7 @@ impl Client {
         R: AsyncRead + Unpin,
         T: CopyFileFromContainer,
     {
-        let mut archive = AsyncTarArchive::new(reader);
-        let entries = archive.entries().map_err(CopyFromContainerError::Io)?;
-
-        pin_mut!(entries);
-
-        while let Some(entry) = entries
-            .try_next()
-            .await
-            .map_err(CopyFromContainerError::Io)?
-        {
-            match entry.header().entry_type() {
-                EntryType::GNULongName
-                | EntryType::GNULongLink
-                | EntryType::XGlobalHeader
-                | EntryType::XHeader
-                | EntryType::GNUSparse => continue, // skip metadata entries
-                EntryType::Directory => return Err(CopyFromContainerError::IsDirectory),
-                EntryType::Regular | EntryType::Continuous => {
-                    return target.copy_from_reader(entry).await
-                }
-                et => return Err(CopyFromContainerError::UnsupportedEntry(et)),
-            }
-        }
-
-        Err(CopyFromContainerError::EmptyArchive)
+        crate::core::copy::extract_file_entry(reader, target).await
     }
 
     pub(crate) async fn container_is_running(
@@ -594,9 +569,12 @@ impl Client {
 
         let credentials = None;
 
+        let build_client = self
+            .bollard
+            .clone()
+            .with_request_modifier(bollard_client::build_request);
         let mut building =
-            self.bollard
-                .build_image(build_options, credentials, Some(body_full(tar)));
+            build_client.build_image(build_options, credentials, Some(body_full(tar)));
 
         while let Some(result) = building.next().await {
             match result {
