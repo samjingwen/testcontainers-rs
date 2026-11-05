@@ -45,6 +45,18 @@ fn add_user_agent(mut req: bollard::BollardRequest) -> bollard::BollardRequest {
     req
 }
 
+// BuildKit can acknowledge /build before consuming its context. A dedicated
+// close-delimited build transport avoids the Docker persistent-connection race.
+// Preserve User-Agent and the separate /session upgrade used by Bollard.
+pub(super) fn build_request(req: bollard::BollardRequest) -> bollard::BollardRequest {
+    let mut req = add_user_agent(req);
+    if req.method() == http::Method::POST && req.uri().path().ends_with("/build") {
+        req.headers_mut()
+            .insert(http::header::CONNECTION, HeaderValue::from_static("close"));
+    }
+    req
+}
+
 #[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
 fn connect_with_ssl(config: &env::Config) -> Result<Docker, bollard::errors::Error> {
     let cert_path = config.cert_path().expect("cert path not found");
@@ -62,6 +74,25 @@ fn connect_with_ssl(config: &env::Config) -> Result<Docker, bollard::errors::Err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_transport_closes_only_build_requests_and_preserves_session_upgrade_and_user_agent() {
+        for (method, path, expected) in [
+            ("POST", "/v1.53/build", "close"),
+            ("POST", "/v1.53/session", "Upgrade"),
+            ("GET", "/v1.53/build", "Upgrade"),
+        ] {
+            let request = http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(http::header::CONNECTION, "Upgrade")
+                .body(bollard::body_full(bytes::Bytes::new()))
+                .unwrap();
+            let request = build_request(request);
+            assert_eq!(request.headers()[http::header::CONNECTION], expected);
+            assert_eq!(request.headers()[USER_AGENT], USER_AGENT_VALUE);
+        }
+    }
 
     #[test]
     fn user_agent_value_has_correct_format() {
